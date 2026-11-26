@@ -6,7 +6,8 @@ on:
       - main
 
 env:
-  IMAGE_NAME: spring-boot-app
+  AWS_REGION: ap-southeast-2
+  ECR_REPOSITORY: my-springboot-app
 
 jobs:
   build-deploy:
@@ -20,35 +21,43 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 17
           cache: maven
 
       - name: Build Jar
         run: mvn clean package -DskipTests
 
-      - name: Build Docker Image
-        run: docker build -t ${{ secrets.DOCKER_USERNAME}}/${{ env.IMAGE_NAME}}:latest .
-
-      - name: Login to dockerhub
-        uses: docker/login-action@v3
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Push Image
-        run: docker push ${{ secrets.DOCKER_USERNAME}}/${{ env.IMAGE_NAME}}:latest
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Push Image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -t $REGISTRY/$ECR_REPOSITORY:latest -t $REGISTRY/$ECR_REPOSITORY:${{ github.sha }} .
+          docker push $REGISTRY/$ECR_REPOSITORY --all-tags
 
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         with:
-          host: ${{secrets.EC2_HOST}}
-          username: ${{secrets.EC2_USER}}
-          key:  ${{secrets.EC2_SSH_KEY}}
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: REGISTRY,ECR_REPOSITORY,AWS_REGION
           script: |
-            docker pull ${{ secrets.DOCKER_USERNAME}}/${{ env.IMAGE_NAME}}:latest
+            aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $REGISTRY
+            docker pull $REGISTRY/$ECR_REPOSITORY:latest
             docker stop spring-boot-app || true
             docker rm spring-boot-app || true
-            docker run -d --name spring-boot-app --restart unless-stopped -p 8080:8080 ${{ secrets.DOCKER_USERNAME}}/${{ env.IMAGE_NAME}}:latest
+            docker run -d --name spring-boot-app --restart unless-stopped -p 8080:8080 $REGISTRY/$ECR_REPOSITORY:latest
             docker image prune -f
-            
-
